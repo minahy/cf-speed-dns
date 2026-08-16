@@ -1,30 +1,92 @@
-name: 'dns_cf_push'
+import os
+import requests
+import json
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+cf_dns_name = os.getenv("CF_DNS_NAME")
+print(f"目标DNS域名：{cf_dns_name}")
 
-on:
-  schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+CF_API_TOKEN = os.getenv("CF_API_TOKEN")
+CF_ZONE_ID = os.getenv("CF_ZONE_ID")
+CF_DNS_NAME = cf_dns_name
+PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN")
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v6
-      - name: 'Set up Python'
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.12
-      - name: 'Install dependencies'
-        run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: 'run dnscf'
-        env:
-          DEBUG: true
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
-          CF_DNS_NAME: ${{ secrets.CF_DNS_NAME }}
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-        run: python dnscf.py
+headers = {
+    "Authorization": f"Bearer {CF_API_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+def get_public_ip():
+    ip_sources = [
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+    ]
+    ips = []
+    for url in ip_sources:
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code == 200:
+                ip = resp.text.strip()
+                if ip:
+                    ips.append(ip)
+        except Exception:
+            continue
+    return ips
+
+def get_dns_record():
+    url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records?name={CF_DNS_NAME}"
+    resp = requests.get(url, headers=headers)
+    data = resp.json()
+    if data["success"] and len(data["result"]) > 0:
+        return data["result"][0]
+    return None
+
+def update_dns(record_id, ip):
+    url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}"
+    payload = {
+        "type": "A",
+        "name": CF_DNS_NAME,
+        "content": ip,
+        "ttl": 1,
+        "proxied": False
+    }
+    resp = requests.put(url, headers=headers, data=json.dumps(payload))
+    return resp.json()
+
+def send_pushplus(title, content):
+    if not PUSHPLUS_TOKEN:
+        return
+    url = "http://www.pushplus.plus/send"
+    payload = {
+        "token": PUSHPLUS_TOKEN,
+        "title": title,
+        "content": content
+    }
+    requests.post(url, data=json.dumps(payload), headers={"Content-Type":"application/json"})
+
+if __name__ == "__main__":
+    ip_list = get_public_ip()
+    print(f"获取到IP列表: {ip_list}")
+    if not ip_list:
+        print("未获取公网IP")
+        exit(1)
+    if len(ip_list) > 1:
+        print(f"警告: IP数量({len(ip_list)})超过 DNS 记录数量(1)，只要更新前 1 个")
+    current_ip = ip_list[0]
+    record = get_dns_record()
+    if not record:
+        print("未找到DNS记录")
+        exit(1)
+    dns_ip = record["content"]
+    record_id = record["id"]
+    if current_ip == dns_ip:
+        print(f"cf_dns_change skip: ---- Time: {json.__name__} ---- ip: {current_ip} (已是最新)")
+    else:
+        print(f"IP变更: {dns_ip} → {current_ip},开始更新")
+        ret = update_dns(record_id, current_ip)
+        print(ret)
+        if ret.get("success"):
+            send_pushplus("DDNS更新成功", f"{CF_DNS_NAME} 更新为 {current_ip}")
+        else:
+            send_pushplus("DDNS更新失败", str(ret))
+    if not PUSHPLUS_TOKEN:
+        print("PUSHPLUS_TOKEN 未设置，跳过消息推送")
