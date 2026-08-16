@@ -1,0 +1,19 @@
+name: Keep‑alive
+on:
+  schedule:
+    - cron: '0 0 */50 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Empty commit prevent disable
+        run: |
+          git config user.name "github‑actions[bot]"
+          git config user.email "github‑actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "keepalive: reset 60‑day inactivity timer"
+          git push
